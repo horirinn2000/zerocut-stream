@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "playMinutesPerVideo": 60,
+  "reviewMinutesPerVideo": 20,
+  "allowedHistoricalPlayMinutesPerVideo": [60],
+  "allowedHistoricalReviewMinutesPerVideo": [20],
+  "regionalLaborRatesJpyPerHour": {
+    "JP": 1320
+  },
+  "allowedHistoricalRegionalRatesJpyPerHour": {
+    "JP": [1320]
+  },
+  "minutesHistory": [
+    {
+      "effectiveFrom": "2026-10-01",
+      "playMinutesPerVideo": 60,
+      "reviewMinutesPerVideo": 20,
+      "rationale": "初出ゲーム公開動画1本あたりの標準プレイ時間を60分、最終目視・配信規約確認・YouTube手動投稿の標準作業時間を20分として設定。"
+    }
+  ],
+  "rateHistory": [
+    {
+      "effectiveFrom": "2026-10-01",
+      "regionCode": "JP",
+      "rateJpyPerHour": 1320,
+      "rationale": "2026年10月時点の東京都地域別最低賃金を上回り、外部委託・雇用時にも適法かつ1分あたり整数（22円/分）となって視聴者が暗算でも検算可能な初期基準値として設定。"
+    }
+  ]
+}

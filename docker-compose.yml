@@ -1,0 +1,28 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: zerocut-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-zerocut_root_dev_password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-zerocut_stream}
+      MYSQL_USER: ${MYSQL_USER:-zerocut_app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-zerocut_dev_password}
+      TZ: Asia/Tokyo
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+09:00
+    volumes:
+      - zerocut_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+volumes:
+  zerocut_mysql_data:

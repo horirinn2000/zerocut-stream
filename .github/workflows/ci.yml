@@ -1,0 +1,55 @@
+name: ZeroCut Stream Public Ledger & Portal CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  web:
+    name: Web Ledger & Fair Draw (Node 22 + MySQL 8.0)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: zerocut_root_ci_password
+          MYSQL_DATABASE: zerocut_stream_test
+          MYSQL_USER: zerocut_app
+          MYSQL_PASSWORD: zerocut_ci_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uzerocut_app -pzerocut_ci_password --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    defaults:
+      run:
+        working-directory: web
+    env:
+      CI: "true"
+      DATABASE_URL: "mysql://zerocut_app:zerocut_ci_password@127.0.0.1:3306/zerocut_stream_test"
+      STEAM_KEY_ENCRYPTION_KEY_HEX: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      AUTH_IDENTITY_PEPPER: "ci-only-identity-pepper"
+      APP_LOCALE: "ja"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma Client & deploy migrations (including SQL CHECK constraints)
+        run: |
+          npx prisma generate
+          npx prisma migrate deploy
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Run unit & integration tests
+        run: npm test
+      - name: Verify seed script
+        run: npm run db:seed

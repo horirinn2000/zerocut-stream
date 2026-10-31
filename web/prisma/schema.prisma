@@ -1,0 +1,194 @@
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum FootageSource {
+  HUMAN_PLAY     // 人間による初出ゲームプレイ録画（公開定数の固定プレイ分数 × 地域時給を計上）
+  SECONDARY_CLIP // 同月・同ゲームの2本目以降または切り出し（プレイ人件費 0分・0.00円固定）
+  BOT_PLAY       // 自動プレイBot録画（プレイ人件費 0分・0.00円固定）
+}
+
+enum ContentIdStatus {
+  CLEAR                      // Content ID 申し立てなし（通常収益化）
+  CLAIMED_REVENUE_REDIRECTED // BGM等の権利者へ広告収益が移転（売上妥当性監査の説明記録として公開）
+  RESTRICTED                 // ブロック・公開停止（月次精算対象外）
+}
+
+enum PurchaseChannel {
+  DIRECT_FROM_DEVELOPER // 開発者へ直接定価支払い（開発者取り分100%・Steamworksキー受領）
+  STEAM_STORE_GIFT      // Steamストアでの定価ギフト購入（Valveキー審査上限時のフォールバック）
+}
+
+// 1. インディーゲーム情報（実況対象＆定価買い上げ対象・PR案件費カラムなし・自己取引禁止）
+model IndieGame {
+  id                   Int                        @id @default(autoincrement())
+  title                String
+  steamAppId           String                     @unique
+  storeUrl             String
+  retailPriceJpy       Int                        // 現在の定価（円）
+  developerName        String
+  developerContact     String?                    // 買い上げ連絡・拡散連携先
+  isOperatorAffiliated Boolean                    @default(false) // 運営者・関連当事者タイトルか（trueの場合は登録・精算対象から除外）
+  isApproved           Boolean                    @default(false)
+  createdAt            DateTime                   @default(now())
+
+  videos               VideoCostLedger[]
+  allocations          SettlementGameAllocation[]
+  steamKeys            SteamKeyInventory[]
+}
+
+// 2. 動画1本ごとの原価・人件費・公開再生数スナップショット台帳（AIエンジン・人間生身配信者の両対応）
+model VideoCostLedger {
+  id                        Int             @id @default(autoincrement())
+  youtubeVideoId            String?         @unique
+  title                     String
+  gameId                    Int
+  game                      IndieGame       @relation(fields: [gameId], references: [id])
+
+  // 2-A. AI・計算機生成原価（人間生身配信者モードでは isSyntheticContent = false, llmModelName = null, 0.00円）
+  isSyntheticContent        Boolean         @default(true)
+  llmModelName              String?
+  inputTokens               Int             @default(0)
+  outputTokens              Int             @default(0)
+  inputRateUsdPer1M         Decimal         @default(0.0000) @db.Decimal(10, 4)
+  outputRateUsdPer1M        Decimal         @default(0.0000) @db.Decimal(10, 4)
+  usdJpyRate                Decimal         @default(0.0000) @db.Decimal(10, 4)
+  llmCostJpy                Decimal         @default(0.00) @db.Decimal(10, 2)
+  ttsCostJpy                Decimal         @default(0.00) @db.Decimal(10, 2)
+  computeCostJpy            Decimal         @default(0.00) @db.Decimal(10, 2)
+  totalGenerationCost       Decimal         @default(0.00) @db.Decimal(10, 2) // = llmCostJpy + ttsCostJpy + computeCostJpy
+
+  // 2-B. 収録用ゲームソフト購入実費（開発者提供キー時は 0円、購入時は領収書URL必須・現金支出実費に含める）
+  recordingGameCostJpy      Int             @default(0)
+  recordingGameReceiptUrl   String?
+
+  // 2-C. 公開定数（docs/public_constants.json）に基づく固定分数2本立て人件費実費
+  footageSource             FootageSource   @default(HUMAN_PLAY)
+  rawFootageSha256          String?         // 同一生素材からのプレイ人件費二重計上防止用ハッシュ
+  rawFootageSec             Int             @default(0) // 参考技術メタデータ（金額計算には不使用）
+  playRegionCode            String          @default("JP")
+  playMinutes               Int             @default(0) // 初出 HUMAN_PLAY 時 60、2本目以降/BOT_PLAY 時 0
+  playLaborRateJpyPerHour   Int             @default(0) // 公開地域別時給スナップショット（円/時）
+  playLaborCostJpy          Decimal         @default(0.00) @db.Decimal(10, 2)
+  reviewRegionCode          String          @default("JP")
+  reviewMinutes             Int             @default(0) // 公開確定時 20
+  reviewLaborRateJpyPerHour Int             @default(0) // 公開地域別時給スナップショット（円/時）
+  reviewLaborCostJpy        Decimal         @default(0.00) @db.Decimal(10, 2)
+
+  // 2-D. 公開監査・AI開示確認（自己申告記録）・Content ID・公開再生数スナップショット
+  aiDisclosureSet           Boolean         @default(false)
+  contentIdStatus           ContentIdStatus @default(CLEAR)
+  viewCountSnapshot         BigInt?
+  viewCountSnapshottedAt    DateTime?
+
+  publishedAt               DateTime        @default(now())
+}
+
+// 3. 月次収支・事前コミット・繰越精算台帳（MySQL単一行 CHECK制約で ownerProfitJpy = 0 と人件費範囲を強制）
+model MonthlySettlement {
+  id                     Int                        @id @default(autoincrement())
+  yearMonth              String                     @unique // Asia/Tokyo 基準の "YYYY-MM"
+
+  // 応募開始時に確定・事前公開する乱数コミットメント情報
+  entryCutoffAt          DateTime                   // 応募締切日時（これ以降の応募は拒絶）
+  drandChainHash         String                     // 使用するdrandチェーンハッシュ
+  committedDrandRound    BigInt                     // entryCutoffAtから決定論的に導出した未来ラウンド番号
+
+  // 収支内訳・現金支出実費・人件費実費・買い上げ・繰越（1円単位の資金保存則）
+  carryOverFromPrevJpy   Int                        @default(0) // 前月繰越（負値は未回収現金インフラ立替実費のみ）
+  grossAdRevenueJpy      Int                        @default(0) // 当月の確定AdSense売上総額（円）
+  webHostingCostJpy      Int                        @default(0) // 当月のWebサーバー等インフラ固定実費（円）
+  totalInfraCostJpy      Int                        @default(0) // floor(sum(totalGenerationCost + recordingGameCostJpy) + webHostingCostJpy)
+  totalLaborCostJpy      Int                        @default(0) // floor(sum(playLaborCostJpy + reviewLaborCostJpy)) ＝ 発生人件費
+  paidLaborCostJpy       Int                        @default(0) // min(totalLaborCostJpy, max(0, carryOverFromPrev + grossAd - totalInfra))
+  ownerProfitJpy         Int                        @default(0) // 運営利益（常に0円固定）
+  netBuybackPoolJpy      Int                        @default(0) // carryOverFromPrev + grossAd - totalInfra - paidLabor
+  totalKeysPurchased     Int                        @default(0) // 全按分の keysPurchased 合計 (= min(予算本数合計, 確定応募数))
+  totalSpentOnKeysJpy    Int                        @default(0) // 全按分の spentJpy 合計
+  carryOverToNextJpy     Int                        @default(0) // netBuybackPoolJpy - totalSpentOnKeysJpy
+
+  // 第三者検証エビデンス
+  adRevenueEvidenceUrl   String?                    // AdSense確定売上レポート証跡URL
+  entriesSnapshotHash    String?                    // 締切確定時の昇順 entry.id リストの SHA-256 ハッシュ
+  publicRandomSeed       String?                    // committedDrandRound の公開乱数16進値
+  drandSignature         String?                    // drand BLS署名
+  isSettled              Boolean                    @default(false)
+  settledAt              DateTime?
+
+  allocations            SettlementGameAllocation[]
+  entries                MonthlyLotteryEntry[]
+  steamKeys              SteamKeyInventory[]
+}
+
+// 4. 月次精算×対象ゲームの公開再生数比按分レコード（単一行 CHECK制約で spentJpy + remainderJpy = allocatedBudgetJpy 等を強制）
+model SettlementGameAllocation {
+  id                 Int                 @id @default(autoincrement())
+  settlementId       Int
+  settlement         MonthlySettlement   @relation(fields: [settlementId], references: [id])
+  gameId             Int
+  game               IndieGame           @relation(fields: [gameId], references: [id])
+
+  publicViewCount    BigInt              // 当月このゲームの公開動画再生数スナップショット合計（按分根拠）
+  allocatedBudgetJpy Int                 // 公開再生数比（Hamilton最大剰余法）での配分額（円）
+  unitRetailPriceJpy Int                 // 精算時点の対象ゲーム定価スナップショット（円）
+  keysPurchased      Int                 // 買い上げ・配布本数
+  spentJpy           Int                 // 実支出額 (= keysPurchased * unitRetailPriceJpy)
+  remainderJpy       Int                 // 未消化端数 (= allocatedBudgetJpy - spentJpy、翌月全体プールへ合算繰越)
+
+  purchaseChannel    PurchaseChannel     @default(DIRECT_FROM_DEVELOPER)
+  purchaseReceiptUrl String?             // 開発者直接支払またはSteamストア購入の領収書証跡URL
+  createdAt          DateTime            @default(now())
+
+  steamKeys          SteamKeyInventory[]
+
+  @@unique([settlementId, gameId])
+}
+
+// 5. 視聴者アカウント（OAuth検証済みIDのHMACハッシュのみ保持、ランク概念一切なし）
+model ViewerUser {
+  id             String                @id @default(cuid())
+  authProvider   String                // 例: "google"
+  authProviderId String                @unique // HMAC-SHA256(AUTH_IDENTITY_PEPPER, "${provider}:${accountId}")
+  createdAt      DateTime              @default(now())
+
+  entries        MonthlyLotteryEntry[]
+}
+
+// 6. 月次1人1口フラット抽選エントリー（重み・倍率カラム一切なし）
+model MonthlyLotteryEntry {
+  id            Int                @id @default(autoincrement())
+  settlementId  Int
+  settlement    MonthlySettlement  @relation(fields: [settlementId], references: [id])
+  userId        String
+  user          ViewerUser         @relation(fields: [userId], references: [id])
+
+  isWinner      Boolean            @default(false)
+  wonSteamKeyId Int?               @unique
+  wonSteamKey   SteamKeyInventory? @relation(fields: [wonSteamKeyId], references: [id])
+  createdAt     DateTime           @default(now())
+
+  @@unique([settlementId, userId]) // 1精算枠につき物理的に1人1口のみ
+}
+
+// 7. 買い上げたSteamキー在庫と配布管理
+model SteamKeyInventory {
+  id                Int                      @id @default(autoincrement())
+  settlementId      Int
+  settlement        MonthlySettlement        @relation(fields: [settlementId], references: [id])
+  allocationId      Int
+  allocation        SettlementGameAllocation @relation(fields: [allocationId], references: [id])
+  gameId            Int
+  game              IndieGame                @relation(fields: [gameId], references: [id])
+
+  encryptedSteamKey String                   // AES-256-GCM 暗号化済みSteamアクティベーションキー
+  purchasePriceJpy  Int                      // 買い上げ単価（定価）
+  isDistributed     Boolean                  @default(false)
+
+  winnerEntry       MonthlyLotteryEntry?
+  createdAt         DateTime                 @default(now())
+}

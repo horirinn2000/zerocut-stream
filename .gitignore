@@ -1,0 +1,15 @@
+# Env & Secrets
+.env
+.env.*
+!.env.example
+
+# Node / Next.js / TypeScript
+node_modules/
+.next/
+dist/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+
+# OS
+.DS_Store
